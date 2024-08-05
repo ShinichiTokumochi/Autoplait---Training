@@ -1,7 +1,7 @@
 import numpy as np
 from hmmlearn import hmm
 
-cF = 4 * 8
+cF = 4 * 4
 MINK = 1
 MAXK = 8
 INITIALCUT = 3
@@ -41,7 +41,7 @@ class Regime:
         return np.log2(self.model.startprob_ + ZERO) + self.log2B(x) # startprobが0のとき用のZERO
     
     def Nextlog2P(self, x, prevlog2P):
-        return np.array([np.max(prevlog2P + np.log2(self.model.transmat_[:, i])) for i in range(self.k)]) + self.log2B(x)
+        return np.array([np.max(prevlog2P + np.log2(self.model.transmat_[:, i] + ZERO)) for i in range(self.k)]) + self.log2B(x)
     
     def CostM(self):
         k = self.k
@@ -58,16 +58,16 @@ def estimate_regime(X, s = 0, e = None):
     if e == None:
         e = len(X)
     regime = Regime(X[s:e], MINK)
-    CostC = regime.CostC(X)
+    CostT = regime.CostC(X) + regime.CostM()
     for k in range(MINK + 1, MAXK + 1):
         if e - s <= k * k:
             break
         new_regime = Regime(X[s:e], k)
-        new_CostC = new_regime.CostC(X)
-        if CostC > new_CostC:
+        new_CostT= new_regime.CostC(X) + new_regime.CostM()
+        if CostT > new_CostT:
             regime = new_regime
-            CostC = new_CostC
-    return regime, CostC
+            CostT = new_CostT
+    return regime, CostT
 
 
 def CutPointSearch(X, regime1, regime2, delta):
@@ -96,7 +96,7 @@ def CutPointSearch(X, regime1, regime2, delta):
                 next_L1[i] = L1[max_trans_index].copy()
                 next_log2P1[i] = max_log2trans + regime1.log2b(x, i)
             else:
-                next_L1[i] = L2[prev_max_p2_index].copy() + [t]
+                next_L1[i] = L2[prev_max_p2_index].copy() + [t + 1]
                 next_log2P1[i] = max_log2switch + regime1.log2b(x, i)
 
         for u in range(regime2.k):
@@ -108,7 +108,7 @@ def CutPointSearch(X, regime1, regime2, delta):
                 next_L2[u] = L2[max_trans_index].copy()
                 next_log2P2[u] = max_log2trans + regime2.log2b(x, u)
             else:
-                next_L2[u] = L1[prev_max_p1_index].copy() + [t]
+                next_L2[u] = L1[prev_max_p1_index].copy() + [t + 1]
                 next_log2P2[u] = max_log2switch + regime2.log2b(x, u)
             
         log2P1 = next_log2P1
@@ -124,8 +124,8 @@ def CutPointSearch(X, regime1, regime2, delta):
     Lbest = (L1[max_p1_index] if (max_log2p1 > max_log2p2) else L2[max_p2_index]) + [X.shape[0]]
     S1 = []
     S2 = []
-    m1 = (len(Lbest) + 1) // 2
-    m2 = len(Lbest) // 2
+    # m1 = (len(Lbest) + 1) // 2
+    # m2 = len(Lbest) // 2
     ts = 0
     for i, l in enumerate(Lbest):
         if i % 2 == 0:
@@ -136,14 +136,14 @@ def CutPointSearch(X, regime1, regime2, delta):
     
     if max_log2p1 > max_log2p2:
         if len(Lbest) % 2 == 1:
-            return m1, m2, S1, S2
+            return S1, S2
         else:
-            return m2, m1, S2, S1
+            return S2, S1
     else:
         if len(Lbest) % 2 == 1:
-            return m2, m1, S2, S1
+            return S2, S1
         else:
-            return m1, m2, S1, S2
+            return S1, S2
 
 
 def RegimeSplit(X):
@@ -174,8 +174,13 @@ def RegimeSplit(X):
     
     CostT = CostC1 + CostC2 + regime1.CostM() + regime2.CostM()
 
+    # model estimation
     for i in range(MAXEM):
-        m1, m2, S1, S2 = CutPointSearch(X, regime1, regime2, delta)
+        S1, S2 = CutPointSearch(X, regime1, regime2, delta)
+        m1 = len(S1)
+        m2 = len(S2)
+        if m1 == 0 or m2 == 0:
+            break
         S1 = np.array(S1)
         S2 = np.array(S2)
         S1_len = S1[:, 1] - S1[:, 0]
@@ -189,7 +194,6 @@ def RegimeSplit(X):
         new_regime1, new_CostC1 = estimate_regime(X[target_S1[0]:target_S1[1]])
         new_regime2, new_CostC2 = estimate_regime(X[target_S2[0]:target_S2[1]])
         new_CostT = new_CostC1 + new_CostC2 + new_regime1.CostM() + new_regime2.CostM()
-
         if new_CostT < CostT:
             regime1 = new_regime1
             regime2 = new_regime2
@@ -198,21 +202,42 @@ def RegimeSplit(X):
         else:
             break
 
-    return S1, S2
+    return regime1, regime2, delta
 
 
-class AutoPlait:
+def AutoPlait(X):
+    regime, CostC = estimate_regime(X)
+    Q = [[[[0, len(X)]], np.log2(len(X)) + regime.CostM() + CostC]]
 
-    def __init__(self, X):
-        '''
-        model = hmm.GaussianHMM(5)
-        model.fit(X)
+    result = []
 
-        print(model.means_)
-        print(model.covars_)
-        print(model.transmat_)
-        print(model.startprob_)
-        '''
-        self.d = X.shape[1]
+    while Q:
+        S0, CostT0 = Q.pop()
+        S0 = np.array(S0)
+        S0_len = S0[:, 1] - S0[:, 0]
+        target_S0 = S0[np.argmax(S0_len)]
 
-        # model estimation
+        regime1, regime2, delta = RegimeSplit(X[target_S0[0]:target_S0[1]])
+        S1 = []
+        S2 = []
+        for s, e in S0:
+            s1, s2 = CutPointSearch(X[s:e], regime1, regime2, delta)
+            print(s1)
+            S1 += s1
+            S2 += s2
+        
+        CostT1 = regime1.CostM()
+        CostT2 = regime2.CostM()
+        for s, e in S1:
+            CostT1 += np.log2(e - s) + regime1.CostC(X[s:e])
+        for s, e in S2:
+            CostT2 += np.log2(e - s) + regime2.CostC(X[s:e])
+
+        if CostT0 > CostT1 + CostT2:
+            Q.append([S1, CostT1])
+            Q.append([S2, CostT2])
+        else:
+            result.append(S0)
+
+    print(result)
+    return result
